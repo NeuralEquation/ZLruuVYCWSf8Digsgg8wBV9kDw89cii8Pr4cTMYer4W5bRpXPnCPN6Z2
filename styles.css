@@ -119,6 +119,10 @@ a {
   box-shadow: 0 14px 28px rgba(19, 34, 39, 0.12);
 }
 
+.guide-break {
+  display: none;
+}
+
 .tab-bar {
   position: sticky;
   top: 0;
@@ -346,6 +350,9 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 20px;
   overflow: hidden;
+  content-visibility: auto;
+  contain: layout style paint;
+  contain-intrinsic-size: 360px;
 }
 
 .card.is-unavailable,
@@ -502,6 +509,10 @@ button:disabled {
   line-height: 1.6;
 }
 
+.restaurant-genre-row {
+  margin-top: 12px;
+}
+
 .wait-controls {
   display: grid;
   grid-template-columns: 46px 1fr 46px;
@@ -607,6 +618,9 @@ button:disabled {
   gap: 12px;
   overflow: hidden;
   padding: 0;
+  content-visibility: auto;
+  contain: layout style paint;
+  contain-intrinsic-size: 420px;
 }
 
 .ranking-body {
@@ -742,6 +756,10 @@ button:disabled {
   .guide-banner {
     padding: 16px;
     font-size: 1.02rem;
+  }
+
+  .guide-break {
+    display: block;
   }
 
   .panel {
