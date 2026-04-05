@@ -1,4 +1,4 @@
-const CACHE_VERSION = "tds-planner-v3";
+const CACHE_VERSION = "tds-planner-v4";
 const APP_SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
@@ -12,7 +12,6 @@ const APP_SHELL_FILES = [
   "./data/attractions.js",
   "./data/restaurants.js",
   "./data/restaurant-menus.js",
-  "./data/restaurant-menus.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png"
 ];
