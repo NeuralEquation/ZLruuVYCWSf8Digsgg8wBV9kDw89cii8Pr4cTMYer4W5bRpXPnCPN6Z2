@@ -42,6 +42,7 @@
     result[AREA_CODE_MAP[key]] = key;
     return result;
   }, {});
+  AREA_DISPLAY_NAMES.EN = "入口付近";
 
   const AREA_CENTERS = {
     MH: { lat: 35.6260, lng: 139.8818 },
@@ -54,6 +55,11 @@
     MI: { lat: 35.6266, lng: 139.8839 }
   };
 
+  const PARK_REFERENCE_COORDINATES = { lat: 35.6269, lng: 139.8850 };
+  const ENTRANCE_COORDINATES = { lat: 35.6322, lng: 139.8804 };
+  const PARK_OUTSIDE_THRESHOLD_METERS = 1600;
+  const ENTRANCE_THRESHOLD_METERS = 220;
+
   const UNAVAILABLE_ATTRACTION_IDS = new Set([
     "attr-221-ml",
     "attr-222-lrd",
@@ -61,6 +67,7 @@
     "attr-224-mi"
   ]);
 
+  // 2026/04/25 の運営予定で休止になっているレストラン。
   const UNAVAILABLE_RESTAURANT_IDS = new Set([
     "rest-425-aw",
     "rest-429-aw",
@@ -75,12 +82,16 @@
     { id: "attr-222-lrd", label: "ロストリバーデルタ / インディ・ジョーンズ・アドベンチャー付近" },
     { id: "attr-220-ac", label: "アラビアンコースト / ジャスミンのフライングカーペット付近" },
     { id: "attr-202-ml", label: "マーメイドラグーン / アリエルのプレイグラウンド付近" },
-    { id: "attr-223-mi", label: "ミステリアスアイランド / センター・オブ・ジ・アース付近" }
+    { id: "attr-223-mi", label: "ミステリアスアイランド / センター・オブ・ジ・アース付近" },
+    { id: "entrance", label: "入口付近" }
   ];
 
   const state = {
     attractions: Array.isArray(window.TDS_ATTRACTIONS) ? window.TDS_ATTRACTIONS.slice() : [],
     restaurants: Array.isArray(window.TDS_RESTAURANTS) ? window.TDS_RESTAURANTS.slice() : [],
+    restaurantMenus: Array.isArray(window.TDS_RESTAURANT_MENUS) ? window.TDS_RESTAURANT_MENUS.slice() : [],
+    restaurantMenuIndex: {},
+    restaurantGenreMap: {},
     waitTimes: loadStoredObject(STORAGE_KEYS.waitTimes, {}),
     selectedAttractions: loadStoredArray(STORAGE_KEYS.selectedAttractions),
     fallback: loadStoredObject(STORAGE_KEYS.locationFallback, null),
@@ -114,6 +125,7 @@
     state.selectedAttractions = state.selectedAttractions.filter(function (id) {
       return attractionMap.has(id);
     });
+    buildRestaurantMenuIndex();
 
     populateSelect(refs.attractionAreaFilter, [{ value: "", label: "すべて" }].concat(
       uniqueValues(state.attractions.map(function (item) { return item.area; })).map(function (area) {
@@ -145,7 +157,7 @@
       return { value: choice.id, label: choice.label };
     }));
 
-    if (state.fallback && state.fallback.type === "landmark" && state.fallback.attractionId) {
+    if (state.fallback && (state.fallback.type === "landmark" || state.fallback.type === "entrance") && state.fallback.attractionId) {
       refs.fallbackLandmarkSelect.value = state.fallback.attractionId;
     }
 
@@ -264,7 +276,7 @@
     return "" +
       "<article class=\"card attraction-card" + (unavailable ? " is-unavailable" : "") + "\">" +
         "<div class=\"attraction-visual\">" +
-          (item.imageUrl ? "<img src=\"" + escapeHtml(item.imageUrl) + "\" alt=\"" + escapeHtml(item.name) + "\">" : "") +
+          (item.imageUrl ? "<img src=\"" + escapeHtml(item.imageUrl) + "\" alt=\"" + escapeHtml(item.name) + "\" loading=\"lazy\" decoding=\"async\">" : "") +
           (unavailable ? "<span class=\"unavailable-stamp\">休止中</span>" : "") +
         "</div>" +
         "<div class=\"card-body\">" +
@@ -314,9 +326,12 @@
     }
 
     if (!hasTravelBasis()) {
+      const gpsLocationState = getGpsLocationState();
       refs.rankingList.innerHTML = renderEmptyState(
         "位置情報がまだ確定していません。",
-        "「GPSの再取得」を試すか、「近い目印」または「位置がわからない」を選ぶと候補が表示されます。"
+        gpsLocationState && gpsLocationState.type === "park_outside"
+          ? "GPSではパーク外になりました。「入口付近」、「近い目印」、または「位置がわからない」を選ぶと候補が表示されます。"
+          : "「GPSの再取得」を試すか、「入口付近」、「近い目印」、または「位置がわからない」を選ぶと候補が表示されます。"
       );
       return;
     }
@@ -351,6 +366,8 @@
         ? "GPS概算 / " + escapeHtml(AREA_DISPLAY_NAMES[entry.travelInfo.areaCode] || "")
         : entry.travelInfo.mode === "fallback-center"
           ? "CENTER基準"
+          : entry.travelInfo.mode === "fallback-entrance"
+            ? "入口付近基準"
           : "目印エリア基準";
       const routeStep = routeTimeline[index];
       const timelineHtml = state.showRouteTimes && routeStep
@@ -365,7 +382,7 @@
       return "" +
         "<article class=\"ranking-card\">" +
           (entry.item.imageUrl
-            ? "<div class=\"ranking-visual attraction-visual\"><img src=\"" + escapeHtml(entry.item.imageUrl) + "\" alt=\"" + escapeHtml(entry.item.name) + "\"></div>"
+            ? "<div class=\"ranking-visual attraction-visual\"><img src=\"" + escapeHtml(entry.item.imageUrl) + "\" alt=\"" + escapeHtml(entry.item.name) + "\" loading=\"lazy\" decoding=\"async\"></div>"
             : "") +
           "<div class=\"ranking-body\">" +
           "<div class=\"ranking-row\">" +
@@ -405,12 +422,15 @@
       return;
     }
 
-    refs.restaurantsList.innerHTML = filtered.map(function (item) {
+    refs.restaurantsList.innerHTML = filtered.map(function (entry) {
+      const item = entry.item;
       const unavailable = isRestaurantUnavailable(item);
+      const matchedMenusText = buildMatchedMenusText(entry.matchedMenus);
+      const genreBadges = buildRestaurantGenreBadges(item.id);
       return "" +
         "<article class=\"restaurant-card" + (unavailable ? " is-unavailable" : "") + "\">" +
           (item.imageUrl
-            ? "<div class=\"restaurant-visual\"><img src=\"" + escapeHtml(item.imageUrl) + "\" alt=\"" + escapeHtml(item.name) + "\">" + (unavailable ? "<span class=\"unavailable-stamp\">休止中</span>" : "") + "</div>"
+            ? "<div class=\"restaurant-visual\"><img src=\"" + escapeHtml(item.imageUrl) + "\" alt=\"" + escapeHtml(item.name) + "\" loading=\"lazy\" decoding=\"async\">" + (unavailable ? "<span class=\"unavailable-stamp\">休止中</span>" : "") + "</div>"
             : "") +
           "<div class=\"restaurant-body\">" +
             "<div class=\"card-topline\">" +
@@ -423,6 +443,8 @@
             "</div>" +
             "<h3 class=\"restaurant-title\">" + escapeHtml(item.name) + "</h3>" +
             "<p class=\"restaurant-description\">" + escapeHtml(item.description || "") + "</p>" +
+            (genreBadges ? "<div class=\"badge-row restaurant-genre-row\">" + genreBadges + "</div>" : "") +
+            (matchedMenusText ? "<p class=\"restaurant-description\">" + escapeHtml(matchedMenusText) + "</p>" : "") +
             "<div class=\"restaurant-footer\">" +
               renderDetailLink(item.detailUrl) +
             "</div>" +
@@ -433,6 +455,8 @@
 
   function renderLocation() {
     const pieces = [];
+    const gpsLocationState = getGpsLocationState();
+    const effectiveLocationState = getEffectiveLocationState();
     renderLocationModeBanner();
     if (state.isOffline) {
       pieces.push(renderLocationCard("オフライン中", buildOfflineLocationMessage(), "danger"));
@@ -440,9 +464,14 @@
     if (state.gps.status === "requesting") {
       pieces.push(renderLocationCard("GPS取得中", state.isOffline ? "オフラインでも取得を試しています。" : "現在地を確認しています。", "neutral"));
     } else if (state.gps.status === "success" && state.gps.position) {
-      const nearestArea = getNearestAreaCode(state.gps.position);
-      const detail = (AREA_DISPLAY_NAMES[nearestArea] || "不明エリア") + " 付近";
-      pieces.push(renderLocationCard("GPSを使用中", detail, "ok"));
+      if (gpsLocationState && gpsLocationState.type === "park_outside") {
+        pieces.push(renderLocationCard("GPSを使用中", "パーク外", "danger"));
+      } else if (gpsLocationState && gpsLocationState.type === "entrance") {
+        pieces.push(renderLocationCard("GPSを使用中", "入口付近", "ok"));
+      } else {
+        const detail = (AREA_DISPLAY_NAMES[gpsLocationState && gpsLocationState.areaCode] || "不明エリア") + " 付近";
+        pieces.push(renderLocationCard("GPSを使用中", detail, "ok"));
+      }
     } else if (state.gps.status === "error") {
       pieces.push(renderLocationCard("GPSを使えません", state.gps.errorMessage || "下から場所を選んでください。", "danger"));
     } else if (state.lastKnownPosition) {
@@ -451,12 +480,17 @@
       pieces.push(renderLocationCard("位置未設定", "GPSを再取得してください。", "neutral"));
     }
 
+    if (effectiveLocationState && effectiveLocationState.source === "fallback") {
+      pieces.push(renderLocationCard("手動で使用中", effectiveLocationState.label, "neutral"));
+    }
+
     refs.locationStatus.innerHTML = pieces.join("");
-    refs.fallbackPanel.classList.toggle("is-hidden", state.gps.status !== "error");
+    refs.fallbackPanel.classList.toggle("is-hidden", state.gps.status !== "error" && (!gpsLocationState || gpsLocationState.type !== "park_outside"));
   }
 
   function renderLocationModeBanner() {
-    if (state.gps.status === "success" && state.gps.position) {
+    const gpsLocationState = getGpsLocationState();
+    if (state.gps.status === "success" && state.gps.position && (!gpsLocationState || gpsLocationState.type !== "park_outside")) {
       refs.locationModeBanner.className = "location-mode-banner is-hidden";
       refs.locationModeBanner.textContent = "";
       return;
@@ -465,6 +499,12 @@
     if (!state.fallback) {
       refs.locationModeBanner.className = "location-mode-banner is-hidden";
       refs.locationModeBanner.textContent = "";
+      return;
+    }
+
+    if (state.fallback.type === "entrance") {
+      refs.locationModeBanner.className = "location-mode-banner landmark";
+      refs.locationModeBanner.textContent = "現在の基準: 入口付近";
       return;
     }
 
@@ -627,6 +667,18 @@
 
   function applyLandmarkFallback() {
     const attractionId = refs.fallbackLandmarkSelect.value;
+    if (attractionId === "entrance") {
+      state.fallback = {
+        type: "entrance",
+        attractionId: "entrance",
+        area: null
+      };
+      saveJson(STORAGE_KEYS.locationFallback, state.fallback);
+      renderLocation();
+      renderRanking();
+      return;
+    }
+
     const attraction = attractionMap.get(attractionId);
     if (!attraction) {
       return;
@@ -655,22 +707,24 @@
 
   function getTravelInfo(attraction) {
     const areaCode = AREA_CODE_MAP[attraction.area];
+    const locationState = getEffectiveLocationState();
 
-    if (state.gps.status === "success" && state.gps.position) {
-      const center = AREA_CENTERS[areaCode];
-      const distanceMeters = haversineMeters(state.gps.position.lat, state.gps.position.lng, center.lat, center.lng);
-      return {
-        minutes: Math.max(2, Math.round(distanceMeters / 65)),
-        mode: "gps",
-        areaCode: areaCode
-      };
-    }
-
-    if (!state.fallback) {
+    if (!locationState || locationState.type === "park_outside") {
       return null;
     }
 
-    if (state.fallback.type === "unknown-center") {
+    if (locationState.source === "gps" && state.gps.position) {
+      const center = AREA_CENTERS[areaCode];
+      const origin = locationState.type === "entrance" ? ENTRANCE_COORDINATES : state.gps.position;
+      const distanceMeters = haversineMeters(origin.lat, origin.lng, center.lat, center.lng);
+      return {
+        minutes: Math.max(2, Math.round(distanceMeters / 65)),
+        mode: "gps",
+        areaCode: locationState.type === "entrance" ? "EN" : areaCode
+      };
+    }
+
+    if (locationState.type === "unknown-center") {
       return {
         minutes: AREA_TRAVEL_MINUTES.CENTER[areaCode],
         mode: "fallback-center",
@@ -678,7 +732,17 @@
       };
     }
 
-    const originAreaCode = AREA_CODE_MAP[state.fallback.area];
+    if (locationState.type === "entrance") {
+      const center = AREA_CENTERS[areaCode];
+      const distanceMeters = haversineMeters(ENTRANCE_COORDINATES.lat, ENTRANCE_COORDINATES.lng, center.lat, center.lng);
+      return {
+        minutes: Math.max(2, Math.round(distanceMeters / 65)),
+        mode: "fallback-entrance",
+        areaCode: "EN"
+      };
+    }
+
+    const originAreaCode = locationState.areaCode;
     return {
       minutes: AREA_TRAVEL_MINUTES[originAreaCode][areaCode],
       mode: "fallback-landmark",
@@ -687,7 +751,7 @@
   }
 
   function hasTravelBasis() {
-    return (state.gps.status === "success" && state.gps.position) || Boolean(state.fallback);
+    return Boolean(getEffectiveLocationState());
   }
 
   function getNearestAreaCode(position) {
@@ -720,7 +784,19 @@
     pills.push("<span class=\"summary-pill" + (state.showRouteTimes ? "" : " alt") + "\">" + (state.showRouteTimes ? "時刻表示: ON" : "時刻表示: OFF") + "</span>");
 
     if (state.gps.status === "success" && state.gps.position) {
-      pills.push("<span class=\"summary-pill\">GPS利用中</span>");
+      const gpsLocationState = getGpsLocationState();
+      if (gpsLocationState && gpsLocationState.type === "park_outside") {
+        pills.push("<span class=\"summary-pill alt\">GPS: パーク外</span>");
+      } else if (gpsLocationState && gpsLocationState.type === "entrance") {
+        pills.push("<span class=\"summary-pill\">GPS: 入口付近</span>");
+      } else {
+        pills.push("<span class=\"summary-pill\">GPS利用中</span>");
+      }
+      if (gpsLocationState && gpsLocationState.type === "park_outside" && state.fallback) {
+        pills.push("<span class=\"summary-pill\">手動位置を使用中</span>");
+      }
+    } else if (state.fallback && state.fallback.type === "entrance") {
+      pills.push("<span class=\"summary-pill\">入口付近</span>");
     } else if (state.fallback && state.fallback.type === "landmark") {
       const attraction = attractionMap.get(state.fallback.attractionId);
       pills.push("<span class=\"summary-pill\">目印基準: " + escapeHtml(attraction ? attraction.name : "選択済み") + "</span>");
@@ -783,7 +859,7 @@
     if (state.gps.status === "success" && state.gps.position) {
       return "公式詳細は開けません。GPSは現在使えています。";
     }
-    return "公式詳細は開けません。GPSが使えないときは目印か位置がわからないを使ってください。";
+    return "公式詳細は開けません。GPSが使えないときは入口付近、目印、または位置がわからないを使ってください。";
   }
 
   function populateSelect(select, options) {
@@ -804,24 +880,142 @@
   }
 
   function getFilteredRestaurants() {
-    const searchValue = refs.restaurantSearch.value.trim().toLowerCase();
+    const searchValue = refs.restaurantSearch.value.trim();
+    const searchTokens = tokenizeSearchValue(searchValue);
     const areaValue = refs.restaurantAreaFilter.value;
     const categoryValue = refs.restaurantCategoryFilter.value;
 
-    return state.restaurants.filter(function (item) {
-      const textPool = [item.name, item.area, item.category, item.serviceType || "", item.description || ""]
-        .join(" ")
-        .toLowerCase();
-      if (searchValue && !textPool.includes(searchValue)) {
-        return false;
+    return state.restaurants.reduce(function (result, item) {
+      const matchedMenus = getMatchedMenus(item.id, searchTokens);
+      const textMatched = matchesSearchText(item._searchText || "", searchTokens);
+      if (searchTokens.length && !textMatched && !matchedMenus.length) {
+        return result;
       }
       if (areaValue && item.area !== areaValue) {
-        return false;
+        return result;
       }
       if (categoryValue && item.category !== categoryValue) {
-        return false;
+        return result;
       }
+      result.push({
+        item: item,
+        matchedMenus: matchedMenus
+      });
+      return result;
+    }, []);
+  }
+
+  function getMatchedMenus(restaurantId, searchTokens) {
+    if (!searchTokens.length) {
+      return [];
+    }
+
+    return (state.restaurantMenuIndex[restaurantId] || []).filter(function (entry) {
+      return matchesSearchText(entry.searchText, searchTokens);
+    }).map(function (entry) {
+      return entry.menu;
+    });
+  }
+
+  function buildMatchedMenusText(matchedMenus) {
+    if (!matchedMenus.length) {
+      return "";
+    }
+
+    const names = uniqueValues(matchedMenus.map(function (menu) {
+      return menu.name;
+    }));
+    const head = names.slice(0, 2).join("、");
+    return "一致したメニュー: " + head + (names.length > 2 ? "、ほか" + (names.length - 2) + "件" : "");
+  }
+
+  function buildRestaurantGenreBadges(restaurantId) {
+    const genres = (state.restaurantGenreMap[restaurantId] || []).slice(0, 4);
+
+    return genres.map(function (genre) {
+      return "<span class=\"badge neutral\">" + escapeHtml(genre) + "</span>";
+    }).join("");
+  }
+
+  function tokenizeSearchValue(value) {
+    if (!value) {
+      return [];
+    }
+
+    return uniqueValues(value.split(/[\s\u3000,、・\/]+/).map(function (token) {
+      return compactSearchText(normalizeSearchText(token.trim()));
+    }).filter(Boolean));
+  }
+
+  function matchesSearchText(text, searchTokens) {
+    if (!searchTokens.length) {
       return true;
+    }
+
+    return searchTokens.every(function (token) {
+      return text.includes(token);
+    });
+  }
+
+  function normalizeSearchText(value) {
+    return toHiragana(String(value || ""))
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[‐‑‒–—―ーｰ]/g, "ー");
+  }
+
+  function compactSearchText(value) {
+    return String(value || "")
+      .replace(/\s+/g, "")
+      .replace(/[・･\-_\/]/g, "")
+      .replace(/ー/g, "");
+  }
+
+  function toHiragana(value) {
+    return String(value || "").replace(/[ァ-ヶ]/g, function (char) {
+      return String.fromCharCode(char.charCodeAt(0) - 0x60);
+    });
+  }
+
+  function buildRestaurantMenuIndex() {
+    state.restaurantMenuIndex = {};
+    state.restaurantGenreMap = {};
+
+    state.restaurants.forEach(function (item) {
+      item._searchText = compactSearchText(normalizeSearchText([
+        item.name,
+        item.area,
+        item.category,
+        item.serviceType || "",
+        item.description || ""
+      ].join(" ")));
+      state.restaurantMenuIndex[item.id] = [];
+      state.restaurantGenreMap[item.id] = [];
+    });
+
+    state.restaurantMenus.forEach(function (menu) {
+      if (!menu || !menu.restaurantId || !menu.name) {
+        return;
+      }
+
+      if (!state.restaurantMenuIndex[menu.restaurantId]) {
+        state.restaurantMenuIndex[menu.restaurantId] = [];
+      }
+
+      state.restaurantMenuIndex[menu.restaurantId].push({
+        menu: menu,
+        searchText: compactSearchText(normalizeSearchText([menu.name].concat(Array.isArray(menu.genres) ? menu.genres : []).join(" ")))
+      });
+
+      if (!state.restaurantGenreMap[menu.restaurantId]) {
+        state.restaurantGenreMap[menu.restaurantId] = [];
+      }
+
+      (Array.isArray(menu.genres) ? menu.genres : []).forEach(function (genre) {
+        if (genre && !state.restaurantGenreMap[menu.restaurantId].includes(genre)) {
+          state.restaurantGenreMap[menu.restaurantId].push(genre);
+        }
+      });
     });
   }
 
@@ -977,6 +1171,90 @@
       Math.sin(dLng / 2) * Math.sin(dLng / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return 6371000 * c;
+  }
+
+  function getGpsLocationState() {
+    if (state.gps.status !== "success" || !state.gps.position) {
+      return null;
+    }
+
+    const position = state.gps.position;
+    const accuracyPadding = Math.min(position.accuracy || 0, 400);
+    const parkDistance = haversineMeters(position.lat, position.lng, PARK_REFERENCE_COORDINATES.lat, PARK_REFERENCE_COORDINATES.lng);
+    if (parkDistance > PARK_OUTSIDE_THRESHOLD_METERS + accuracyPadding) {
+      return {
+        type: "park_outside",
+        label: "パーク外",
+        source: "gps"
+      };
+    }
+
+    const entranceDistance = haversineMeters(position.lat, position.lng, ENTRANCE_COORDINATES.lat, ENTRANCE_COORDINATES.lng);
+    if (entranceDistance <= ENTRANCE_THRESHOLD_METERS + Math.min(position.accuracy || 0, 120)) {
+      return {
+        type: "entrance",
+        label: "入口付近",
+        areaCode: "EN",
+        source: "gps"
+      };
+    }
+
+    const nearestCode = getNearestAreaCode(position);
+    return {
+      type: "area",
+      label: AREA_DISPLAY_NAMES[nearestCode] || "不明エリア",
+      areaCode: nearestCode,
+      source: "gps"
+    };
+  }
+
+  function getFallbackLocationState() {
+    if (!state.fallback) {
+      return null;
+    }
+
+    if (state.fallback.type === "unknown-center") {
+      return {
+        type: "unknown-center",
+        label: "位置がわからない",
+        source: "fallback"
+      };
+    }
+
+    if (state.fallback.type === "entrance") {
+      return {
+        type: "entrance",
+        label: "入口付近",
+        areaCode: "EN",
+        source: "fallback"
+      };
+    }
+
+    const originAreaCode = AREA_CODE_MAP[state.fallback.area];
+    if (!originAreaCode) {
+      return null;
+    }
+
+    return {
+      type: "area",
+      label: state.fallback.area,
+      areaCode: originAreaCode,
+      source: "fallback"
+    };
+  }
+
+  function getEffectiveLocationState() {
+    const gpsLocationState = getGpsLocationState();
+    if (gpsLocationState && gpsLocationState.type !== "park_outside") {
+      return gpsLocationState;
+    }
+
+    const fallbackLocationState = getFallbackLocationState();
+    if (fallbackLocationState) {
+      return fallbackLocationState;
+    }
+
+    return null;
   }
 
   function escapeHtml(value) {
